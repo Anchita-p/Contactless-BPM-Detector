@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PulseVision | Research Biometric Telemetry</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        brand:  { 50:'#F5F3FF', 100:'#EDE9FE', 200:'#DDD6FE', 300:'#C4B5FD',
+                  400:'#A78BFA', 500:'#8B5CF6', 600:'#6366F1', 700:'#4F46E5' },
+        ink:    { 900:'#1E293B', 600:'#475569', 400:'#94A3B8' },
+      },
+      fontFamily: { sans: ['Inter','system-ui','-apple-system','Segoe UI','sans-serif'] },
+    }
+  }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  /* The wash must paint ABOVE the root background and BELOW the content.
+     A negative z-index would put it behind the body's own background box,
+     where it is simply invisible. */
+  html { background:#FBFAFF; }
+  body { background:transparent; }
+  #app { position:relative; z-index:1; }
+
+  /* ── Soft moving light wash ──────────────────────────────────────────
+     Radial gradients, deliberately NOT filter:blur(). A blurred layer has to
+     be re-rasterized whenever it moves or scales, and three large blurred
+     surfaces will eat a whole core on integrated graphics -- which matters
+     here because the capture pipeline needs that CPU. Gradients are already
+     soft, cost nothing to paint, and translate for free on the compositor. */
+  .aurora { position:fixed; inset:-14vmax; z-index:0; pointer-events:none;
+            overflow:hidden; contain: strict; }
+  .aurora span {
+    position:absolute; display:block; border-radius:9999px;
+    transform: translate3d(0,0,0); will-change: transform;
+  }
+  .aurora .b1 { width:60vmax; height:60vmax; left:-8vmax; top:-10vmax;
+    background:radial-gradient(circle closest-side, rgba(167,139,250,.55), rgba(167,139,250,0) 100%);
+    animation: drift1 44s ease-in-out infinite; }
+  .aurora .b2 { width:52vmax; height:52vmax; right:-6vmax; top:0;
+    background:radial-gradient(circle closest-side, rgba(196,181,253,.5), rgba(196,181,253,0) 100%);
+    animation: drift2 58s ease-in-out infinite; }
+  .aurora .b3 { width:66vmax; height:66vmax; left:22vmax; bottom:-18vmax;
+    background:radial-gradient(circle closest-side, rgba(147,183,255,.42), rgba(147,183,255,0) 100%);
+    animation: drift3 70s ease-in-out infinite; }
+  @keyframes drift1 { 0%,100%{transform:translate3d(0,0,0)} 50%{transform:translate3d(6vmax,4vmax,0)} }
+  @keyframes drift2 { 0%,100%{transform:translate3d(0,0,0)} 50%{transform:translate3d(-7vmax,5vmax,0)} }
+  @keyframes drift3 { 0%,100%{transform:translate3d(0,0,0)} 50%{transform:translate3d(4vmax,-6vmax,0)} }
+
+  /* Turned on automatically when the reported capture rate is struggling:
+     every non-essential animation stops so the pipeline gets the CPU. */
+  body.perf .aurora span,
+  body.perf .beating,
+  body.perf .livedot { animation: none !important; }
+
+  .wave { position:fixed; left:0; right:0; top:0; height:420px; z-index:0;
+          pointer-events:none; opacity:.9; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .aurora span { animation: none; }
+    .beating, .livedot { animation: none; }
+  }
+
+  /* Plain CSS, not @apply: the Tailwind Play CDN only processes @apply inside
+     <style type="text/tailwindcss">, so an @apply rule here silently does
+     nothing and every card renders unstyled. */
+  .card {
+    /* Opaque, not translucent+backdrop-filter: a backdrop blur behind
+       fifteen cards re-samples the moving background for each of them
+       every frame, which is the single most expensive thing a page
+       like this can do on integrated graphics. */
+    background:#fff;
+    border-radius:1rem; border:1px solid #EEF0F6;
+    box-shadow:0 1px 2px rgba(16,24,40,.04), 0 8px 24px -18px rgba(79,70,229,.35);
+  }
+  .nav-btn { display:flex; align-items:center; gap:.7rem; width:100%;
+             padding:.6rem .8rem; border-radius:.7rem; font-weight:600;
+             font-size:.875rem; color:#475569; transition:all .15s; text-align:left; }
+  .nav-btn:hover { background:#F5F3FF; color:#4F46E5; }
+  .nav-btn.active { background:linear-gradient(90deg,#EDE9FE,#F5F3FF);
+                    color:#4F46E5; box-shadow:inset 3px 0 0 #6366F1; }
+  .nav-btn svg { width:1.05rem; height:1.05rem; flex:none; }
+
+  @keyframes beat { 0%,100%{transform:scale(1)} 15%{transform:scale(1.18)} 30%{transform:scale(1)} 45%{transform:scale(1.1)} }
+  .beating { animation: beat 1s ease-in-out infinite; transform-origin:center; }
+  @keyframes livedot { 0%,100%{opacity:1} 50%{opacity:.25} }
+  .livedot { animation: livedot 1.4s ease-in-out infinite; }
+  .videoglow { box-shadow: 0 0 0 1px rgba(139,92,246,.18), 0 18px 40px -18px rgba(99,102,241,.45); }
+  .dropzone.dragging { border-color:#8B5CF6; background:#F5F3FF; }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#DDD6FE;border-radius:9999px}
+</style>
+</head>
+<body class="h-full font-sans text-ink-900 antialiased">
+
+<div class="aurora"><span class="b1"></span><span class="b2"></span><span class="b3"></span></div>
+<svg class="wave" viewBox="0 0 1440 340" preserveAspectRatio="none" aria-hidden="true">
+  <path fill="#DDD6FE" fill-opacity=".75"
+        d="M0,180 C220,250 380,90 640,140 C900,190 1120,300 1440,210 L1440,0 L0,0 Z"/>
+  <path fill="#C4B5FD" fill-opacity=".45"
+        d="M0,120 C260,200 460,40 720,110 C980,180 1200,240 1440,150 L1440,0 L0,0 Z"/>
+</svg>
+
+<div id="app" class="flex min-h-screen">
+
+<!-- ── Sidebar ──────────────────────────────────────────────────────────── -->
+<aside id="sidebar"
+  class="fixed lg:static inset-y-0 left-0 z-40 w-[248px] shrink-0 bg-white/95
+         border-r border-slate-100 flex flex-col -translate-x-full lg:translate-x-0 transition-transform">
+
+  <div class="flex items-center gap-3 px-5 h-16 border-b border-slate-100">
+    <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-600 to-brand-500 grid place-items-center shrink-0">
+      <svg viewBox="0 0 24 24" class="w-5 h-5 text-white" fill="currentColor">
+        <path d="M12 21s-7.5-4.7-9.3-9A5.2 5.2 0 0 1 12 6.6 5.2 5.2 0 0 1 21.3 12c-1.8 4.3-9.3 9-9.3 9Z"/>
+      </svg>
+    </div>
+    <div class="leading-tight">
+      <div class="font-extrabold tracking-tight">PulseVision</div>
+      <div class="text-[10px] text-ink-400 font-medium">Your Heart, Our Vision</div>
+    </div>
+  </div>
+
+  <nav class="p-3 space-y-1 overflow-y-auto">
+    <button class="nav-btn active" data-view="live" data-scroll="top">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+      Home
+    </button>
+    <button class="nav-btn" data-view="live" data-scroll="section-monitor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 12 6-3.5v11L16 16"/></svg>
+      Live Monitor
+    </button>
+    <button class="nav-btn" data-view="live" data-scroll="section-algo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9M10 19V5M16 19v-7M22 19h-20"/></svg>
+      Algorithm Comparison
+    </button>
+    <button class="nav-btn" data-view="dataset" data-scroll="top">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+      Accuracy Check
+    </button>
+    <button class="nav-btn" data-view="live" data-scroll="section-wave">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12h4l2-7 4 14 2-7h8"/></svg>
+      Live Waveform
+    </button>
+    <button class="nav-btn" data-view="live" data-scroll="section-tips">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2Z"/></svg>
+      Tips &amp; Insights
+    </button>
+    <button class="nav-btn" data-view="live" data-scroll="section-about">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8.5v.5"/></svg>
+      About
+    </button>
+  </nav>
+
+  <div class="mt-auto p-3">
+    <div class="rounded-2xl p-4 bg-gradient-to-br from-brand-100 via-brand-50 to-white border border-brand-100">
+      <svg viewBox="0 0 24 24" class="w-7 h-7 text-brand-500" fill="currentColor">
+        <path d="M12 21s-7.5-4.7-9.3-9A5.2 5.2 0 0 1 12 6.6 5.2 5.2 0 0 1 21.3 12c-1.8 4.3-9.3 9-9.3 9Z"/>
+      </svg>
+      <p class="mt-2 font-extrabold leading-tight text-ink-900">Your Face<br>Our AI<br>A Healthier You</p>
+      <p class="text-[11px] text-ink-600 mt-2">— Contactless. Real-time. Reliable.</p>
+    </div>
+  </div>
+</aside>
+
+<div id="scrim" class="hidden fixed inset-0 bg-slate-900/30 z-30 lg:hidden"></div>
+
+<!-- ── Main column ──────────────────────────────────────────────────────── -->
+<div class="flex-1 min-w-0">
+
+  <header class="sticky top-0 z-20 bg-white/95 border-b border-slate-100">
+    <div class="px-5 lg:px-8 h-16 flex items-center gap-4">
+      <button id="menu" class="lg:hidden p-2 -ml-2 rounded-lg hover:bg-slate-100" aria-label="Menu">
+        <svg viewBox="0 0 24 24" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+
+      <div class="min-w-0">
+        <h2 id="page-title" class="font-bold truncate">Live Monitor</h2>
+        <p class="text-[11px] text-ink-400 hidden sm:block">Research Biometric Telemetry</p>
+      </div>
+
+      <div class="ml-auto flex items-center gap-2">
+        <span id="pill-camera" class="hidden items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 livedot"></span><span id="pill-camera-text">Camera Active</span>
+        </span>
+        <span id="pill-calib" class="hidden items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-amber-50 text-amber-700"></span>
+        <span id="pill-fps" class="hidden items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-brand-50 text-brand-700"></span>
+        <div class="w-9 h-9 rounded-full bg-gradient-to-br from-brand-500 to-brand-700 grid place-items-center text-white font-bold text-sm">A</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="px-5 lg:px-8 py-7 max-w-[1500px]">
+
+  <!-- ── View 1 : Live Monitor ──────────────────────────────────────────── -->
+  <section id="view-live">
+
+    <div class="mb-6" id="top">
+      <div class="flex flex-wrap gap-2 mb-3">
+        <span class="text-[11px] font-bold px-3 py-1 rounded-full bg-white/70 border border-brand-100 text-brand-700">AI Powered</span>
+        <span class="text-[11px] font-bold px-3 py-1 rounded-full bg-white/70 border border-brand-100 text-brand-700">Contactless</span>
+        <span class="text-[11px] font-bold px-3 py-1 rounded-full bg-white/70 border border-brand-100 text-brand-700">Real-time</span>
+      </div>
+      <h1 class="text-4xl font-extrabold tracking-tight leading-tight">Real Health Insights,<br>
+        <span class="bg-gradient-to-r from-brand-600 to-brand-500 bg-clip-text text-transparent">Just a Look Away</span></h1>
+      <p class="text-ink-600 mt-2 max-w-xl">Check your heart rate and how relaxed you are, using nothing but your
+        webcam. Sit still for about fifteen seconds and watch it appear.</p>
+    </div>
+
+    <div id="banner" class="hidden mb-5 rounded-xl border px-4 py-3 text-sm font-medium"></div>
+
+    <div id="section-monitor" class="grid grid-cols-1 xl:grid-cols-12 gap-6 scroll-mt-24">
+
+      <!-- Left: video + calibration -->
+      <div class="xl:col-span-7">
+        <div class="card p-5">
+          <div class="relative rounded-2xl overflow-hidden bg-slate-900 aspect-[4/3] videoglow grid place-items-center">
+            <img id="video" alt="" class="hidden w-full h-full object-cover">
+
+            <!-- Status is overlaid as real DOM, not painted into the JPEG, so
+                 it stays sharp at any size and can be styled. -->
+            <div id="video-overlay" class="hidden absolute inset-0 pointer-events-none">
+              <div class="absolute top-3 left-3 flex items-center gap-2">
+                <span id="state-chip"
+                  class="text-[11px] font-bold px-3 py-1.5 rounded-full bg-slate-900/80 text-white
+                         ring-1 ring-white/15 flex items-center gap-1.5">
+                  <span id="state-dot" class="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
+                  <span id="state-text">Getting ready</span>
+                </span>
+              </div>
+              <div class="absolute top-3 right-3">
+                <span id="fps-chip"
+                  class="text-[11px] font-semibold px-3 py-1.5 rounded-full bg-slate-900/75 text-white/90 ring-1 ring-white/10 tabular-nums">-- fps</span>
+              </div>
+              <div id="video-hint"
+                class="absolute bottom-3 left-3 right-3 text-center text-[12px] font-medium text-white/90
+                       bg-slate-900/75 ring-1 ring-white/10 rounded-xl px-3 py-2">
+                Sit comfortably and look at the camera.
+              </div>
+            </div>
+
+            <div id="preview-off" class="hidden text-center px-8">
+              <div class="w-16 h-16 mx-auto rounded-2xl bg-white/5 ring-1 ring-white/10 grid place-items-center">
+                <svg viewBox="0 0 24 24" class="w-8 h-8 text-brand-300" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8"/>
+                  <path d="M9.9 4.2A9.8 9.8 0 0112 4c5 0 9 4.5 10 8a15 15 0 01-2.6 3.9M6.6 6.6C4.4 8 2.8 10.1 2 12c1 3.5 5 8 10 8a9.7 9.7 0 004.4-1.1"/>
+                </svg>
+              </div>
+              <p class="text-white font-semibold mt-4">Video hidden</p>
+              <p class="text-slate-400 text-sm mt-1 max-w-xs mx-auto">
+                Still measuring — your readings keep updating on the right.
+              </p>
+            </div>
+
+            <div id="video-placeholder" class="text-center px-8">
+              <div class="w-16 h-16 mx-auto rounded-2xl bg-white/5 ring-1 ring-white/10 grid place-items-center">
+                <svg viewBox="0 0 24 24" class="w-8 h-8 text-brand-300" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 12 6-3.5v11L16 16"/>
+                </svg>
+              </div>
+              <p class="text-white font-semibold mt-4">Ready when you are</p>
+              <p class="text-slate-300 text-sm mt-2 max-w-sm mx-auto">
+                This takes about <b class="text-white">15 seconds</b> before your first reading.
+                We watch for 13 seconds to learn your lighting and collect enough heartbeats,
+                then a few more to lock on.
+              </p>
+              <p class="text-slate-400 text-xs mt-3 max-w-xs mx-auto">
+                Your camera stays on your computer. Nothing is uploaded, recorded or stored.
+              </p>
+            </div>
+          </div>
+
+          <button id="toggle"
+            class="mt-4 w-full py-3 rounded-xl font-bold text-white bg-brand-600 hover:bg-brand-700 transition
+                   flex items-center justify-center gap-2">
+            <span id="toggle-icon" class="w-2.5 h-2.5 rounded-full bg-white/90"></span>
+            <span id="toggle-text">Start</span>
+          </button>
+
+          <label class="mt-3 flex items-center gap-2 text-xs text-ink-600 cursor-pointer select-none">
+            <input id="hide-preview" type="checkbox" class="rounded border-slate-300 text-brand-600">
+            Hide the video while measuring
+            <span class="text-ink-400">— frees up a slower computer; the reading keeps running</span>
+          </label>
+
+          <div id="calibration" class="hidden mt-4 rounded-xl bg-brand-50 border border-brand-100 p-4">
+            <div class="flex items-center justify-between text-sm">
+              <span class="font-semibold text-brand-700">Collecting your heartbeats…</span>
+              <span id="calib-pct" class="font-extrabold text-brand-700 tabular-nums">0%</span>
+            </div>
+            <div class="mt-2 h-2 rounded-full bg-brand-100 overflow-hidden">
+              <div id="calib-bar" class="h-full bg-gradient-to-r from-brand-600 to-brand-500 rounded-full transition-[width] duration-300" style="width:0%"></div>
+            </div>
+            <p id="calib-sub" class="text-xs text-ink-600 mt-2">Hold still — your readings appear when this fills up.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: vitals -->
+      <div class="xl:col-span-5">
+        <div id="vitals-locked" class="card p-10 text-center">
+          <div class="w-14 h-14 mx-auto rounded-2xl bg-brand-50 grid place-items-center">
+            <svg viewBox="0 0 24 24" class="w-7 h-7 text-brand-500" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M3 12h4l2-6 4 12 2-6h6"/>
+            </svg>
+          </div>
+          <h3 class="mt-4 font-bold text-lg">Your results will appear here</h3>
+          <p class="text-ink-600 text-sm mt-1 max-w-md mx-auto">
+            We wait until we've watched you for a few seconds before showing a number —
+            a rushed reading is a wrong reading.
+          </p>
+        </div>
+
+        <div id="vitals" class="hidden grid grid-cols-1 sm:grid-cols-2 gap-5">
+          <div class="card p-6">
+            <div class="flex items-center gap-2 text-sm font-bold text-ink-600">
+              <svg id="hr-icon" viewBox="0 0 24 24" class="w-5 h-5 text-rose-500" fill="currentColor">
+                <path d="M12 21s-7.5-4.7-9.3-9A5.2 5.2 0 0 1 12 6.6 5.2 5.2 0 0 1 21.3 12c-1.8 4.3-9.3 9-9.3 9Z"/>
+              </svg>
+              Heart Rate
+            </div>
+            <div class="mt-3 flex items-end gap-2">
+              <span id="bpm" class="text-6xl font-extrabold tracking-tight tabular-nums">--</span>
+              <span class="text-lg font-bold text-ink-400 mb-2">BPM</span>
+            </div>
+            <div id="bpm-range" class="mt-3 inline-block text-xs font-bold px-3 py-1.5 rounded-full bg-slate-100 text-ink-600">
+              Typical resting range is 60–100
+            </div>
+            <p id="bpm-stale" class="hidden text-[11px] text-amber-600 font-medium mt-2">
+              Holding the last clear reading — your pulse isn't visible right now.
+            </p>
+          </div>
+
+          <div class="card p-6">
+            <div class="flex items-center gap-2 text-sm font-bold text-ink-600">
+              <svg viewBox="0 0 24 24" class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" stroke-width="1.8">
+                <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+              </svg>
+              Stress Index
+            </div>
+            <div class="mt-3 flex items-end gap-2">
+              <span id="rmssd" class="text-6xl font-extrabold tracking-tight tabular-nums">--</span>
+              <span class="text-lg font-bold text-ink-400 mb-2">ms</span>
+            </div>
+            <div id="stress-badge" class="mt-3 inline-block text-xs font-bold px-3 py-1.5 rounded-full bg-slate-100 text-ink-600">
+              Awaiting beats
+            </div>
+            <p id="stress-help" class="text-[11px] text-ink-400 mt-2">
+              Based on the tiny gaps between your heartbeats. Bigger gaps usually mean a calmer body.
+            </p>
+          </div>
+
+          <div class="card p-6 sm:col-span-2">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2 text-sm font-bold text-ink-600">
+                <svg viewBox="0 0 24 24" class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M4 18V9M9 18V5M14 18v-6M19 18v-9"/>
+                </svg>
+                Signal Quality
+              </div>
+              <span id="snr-value" class="text-sm font-extrabold text-brand-700 tabular-nums">-- dB</span>
+            </div>
+            <div class="mt-3 h-2.5 rounded-full bg-slate-100 overflow-hidden">
+              <div id="snr-bar" class="h-full rounded-full bg-gradient-to-r from-brand-600 to-brand-400 transition-all duration-300" style="width:0%"></div>
+            </div>
+            <p id="snr-note" class="text-[11px] text-ink-400 mt-2">
+              How clearly we can see your pulse. Better light and less movement push this up.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Algorithm comparison -->
+    <div id="section-algo" class="card p-6 mt-6 scroll-mt-24">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h3 class="font-bold text-lg">Algorithm Comparison</h3>
+          <p class="text-sm text-ink-600">We measure your pulse three different ways at the same time.
+            <b class="text-ink-900">POS</b> is the one shown as your heart rate; the other two run
+            alongside it as a check. When all three agree, you can trust the number.</p>
+        </div>
+        <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 livedot"></span>Real-time
+        </span>
+      </div>
+      <div id="algo-grid" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-5"></div>
+      <div id="agreement" class="mt-4 rounded-xl px-4 py-3 text-sm font-semibold bg-slate-50 text-ink-600">
+        Waiting for your first reading…
+      </div>
+    </div>
+
+    <!-- Waveform -->
+    <div id="section-wave" class="card p-6 mt-6 scroll-mt-24">
+      <h3 class="font-bold text-lg">Your Pulse, Live</h3>
+      <p class="text-sm text-ink-600">
+        Each peak is one heartbeat, picked up from colour changes in your skin. Last 5 seconds.
+      </p>
+      <div class="mt-4" style="position:relative;height:220px"><canvas id="waveChart"></canvas></div>
+    </div>
+  </section>
+
+  <!-- ── View 2 : Dataset Evaluation ────────────────────────────────────── -->
+  <section id="view-dataset" class="hidden">
+    <div class="mb-6">
+      <h1 class="text-4xl font-extrabold tracking-tight">How accurate
+        <span class="bg-gradient-to-r from-brand-600 to-brand-500 bg-clip-text text-transparent">is it, really?</span></h1>
+      <p class="text-ink-600 mt-2 max-w-2xl">The live monitor can't tell you whether its number is
+        <em>correct</em> — only whether it looks steady. Here you can find out, by replaying a recorded
+        video and comparing what we measure against a pulse reading you already trust.</p>
+    </div>
+
+    <div class="card p-6 mb-6">
+      <h3 class="font-bold text-lg">How this works</h3>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-4">
+        <div class="flex gap-3">
+          <div class="w-7 h-7 rounded-lg bg-brand-100 text-brand-700 font-bold text-sm grid place-items-center shrink-0">1</div>
+          <div>
+            <p class="font-semibold text-sm">Add a video of a face</p>
+            <p class="text-sm text-ink-600 mt-1">Any clip where someone sits reasonably still and their face
+              is lit and visible. Ten seconds is the minimum; thirty or more is better.</p>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <div class="w-7 h-7 rounded-lg bg-brand-100 text-brand-700 font-bold text-sm grid place-items-center shrink-0">2</div>
+          <div>
+            <p class="font-semibold text-sm">Add the real heart rate <span class="text-ink-400 font-normal">(optional)</span></p>
+            <p class="text-sm text-ink-600 mt-1">Whatever a chest strap, pulse oximeter or research dataset
+              recorded at the same time. Without it we'll still show our readings — there's just nothing to
+              score them against.</p>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <div class="w-7 h-7 rounded-lg bg-brand-100 text-brand-700 font-bold text-sm grid place-items-center shrink-0">3</div>
+          <div>
+            <p class="font-semibold text-sm">Read the error</p>
+            <p class="text-sm text-ink-600 mt-1">You get an average error in BPM for each of the three
+              methods, and a chart of our reading laid over the real one.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-5 rounded-xl bg-slate-50 border border-slate-100 p-4">
+        <p class="text-sm font-semibold">What the heart-rate file should look like</p>
+        <p class="text-sm text-ink-600 mt-1">A <code class="text-brand-700">.csv</code> or
+          <code class="text-brand-700">.txt</code> with a time column and a heart-rate column. Plain
+          numbers are fine too — we'll spread them evenly across the video and tell you how we read it.</p>
+        <pre class="mt-3 text-xs bg-white border border-slate-100 rounded-lg p-3 overflow-x-auto">time,bpm
+0.0,72
+1.0,73
+2.0,71</pre>
+      </div>
+    </div>
+
+    <div class="card p-6">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <label class="text-sm font-bold">Video <span class="text-rose-500">*</span></label>
+          <div id="drop-video" class="dropzone mt-2 border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center cursor-pointer hover:border-brand-400 transition">
+            <svg viewBox="0 0 24 24" class="w-9 h-9 mx-auto text-brand-400" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 16V4m0 0 4 4m-4-4L8 8"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+            </svg>
+            <p class="mt-2 text-sm font-semibold">Drop a video of a face</p>
+            <p id="name-video" class="text-xs text-ink-400 mt-1">or click to browse</p>
+          </div>
+          <input id="file-video" type="file" accept=".mp4,.avi,.mov,.mkv" class="hidden">
+        </div>
+
+        <div>
+          <label class="text-sm font-bold">Ground truth <span class="text-ink-400 font-medium">(optional)</span></label>
+          <div id="drop-gt" class="dropzone mt-2 border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center cursor-pointer hover:border-brand-400 transition">
+            <svg viewBox="0 0 24 24" class="w-9 h-9 mx-auto text-brand-400" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M14 3v5h5"/><path d="M6 3h9l5 5v13H6z"/>
+            </svg>
+            <p class="mt-2 text-sm font-semibold">Drop the true pulse readings</p>
+            <p id="name-gt" class="text-xs text-ink-400 mt-1">A .csv or .txt of heart rate over time</p>
+          </div>
+          <input id="file-gt" type="file" accept=".csv,.txt" class="hidden">
+        </div>
+      </div>
+
+      <button id="run-eval"
+        class="mt-5 w-full md:w-auto px-8 py-3 rounded-xl font-bold text-white bg-brand-600 hover:bg-brand-700
+               disabled:opacity-40 disabled:cursor-not-allowed transition">
+        Run the check
+      </button>
+      <button id="run-sample"
+        class="mt-5 md:ml-3 w-full md:w-auto px-6 py-3 rounded-xl font-bold text-brand-700 bg-brand-50
+               hover:bg-brand-100 border border-brand-100 transition">
+        Try the sample clip
+      </button>
+      <div id="eval-status" class="hidden mt-4 text-sm font-medium"></div>
+    </div>
+
+    <div id="eval-results" class="hidden">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-5 mt-6">
+        <div class="card p-6"><div class="text-sm font-bold text-ink-600">Average error</div>
+          <div class="mt-1"><span id="m-mae" class="text-4xl font-extrabold tabular-nums">--</span>
+          <span class="text-ink-400 font-bold ml-1">bpm</span></div></div>
+        <div class="card p-6"><div class="text-sm font-bold text-ink-600">Worst-case error</div>
+          <div class="mt-1"><span id="m-rmse" class="text-4xl font-extrabold tabular-nums">--</span>
+          <span class="text-ink-400 font-bold ml-1">bpm</span></div></div>
+        <div class="card p-6"><div class="text-sm font-bold text-ink-600">Signal quality</div>
+          <div class="mt-1"><span id="m-snr" class="text-4xl font-extrabold tabular-nums">--</span>
+          <span class="text-ink-400 font-bold ml-1">dB</span></div></div>
+      </div>
+
+      <div class="card p-6 mt-6">
+        <h3 class="font-bold text-lg">Our Reading vs the True Pulse</h3>
+        <p id="gt-note" class="text-sm text-ink-600"></p>
+        <div class="mt-4" style="position:relative;height:320px"><canvas id="evalChart"></canvas></div>
+      </div>
+
+      <div class="card p-6 mt-6 overflow-x-auto">
+        <h3 class="font-bold text-lg">How Far Off Each Method Was</h3>
+        <p class="text-sm text-ink-600 mb-4">
+          <b class="text-ink-900">MAE</b> is the headline: typical error in BPM.
+          <b class="text-ink-900">RMSE</b> punishes occasional big misses, so RMSE far above MAE means rare
+          bad failures rather than steady drift. <b class="text-ink-900">MAPE</b> expresses error as a
+          percentage so it compares across people. <b class="text-ink-900">r</b> asks whether the method
+          tracks changes even if it reads consistently high or low, and <b class="text-ink-900">Bias</b>
+          shows that direction. <b class="text-ink-900">95% limits</b> is the range almost every individual
+          reading falls inside — the figure a clinical comparison turns on.
+        </p>
+        <table class="w-full text-sm min-w-[860px]">
+          <thead>
+            <tr class="text-left text-ink-400 border-b border-slate-100">
+              <th class="pb-3 font-semibold">Algorithm</th>
+              <th class="pb-3 font-semibold text-right" title="Mean Absolute Error, in BPM">MAE</th>
+              <th class="pb-3 font-semibold text-right" title="Root Mean Square Error, in BPM">RMSE</th>
+              <th class="pb-3 font-semibold text-right" title="Mean Squared Error, in BPM squared">MSE</th>
+              <th class="pb-3 font-semibold text-right" title="Mean Absolute Percentage Error">MAPE</th>
+              <th class="pb-3 font-semibold text-right" title="Pearson correlation with the true pulse">r</th>
+              <th class="pb-3 font-semibold text-right" title="Mean signed error: positive reads high">Bias</th>
+              <th class="pb-3 font-semibold text-right" title="Bland-Altman 95% limits of agreement">95% limits</th>
+              <th class="pb-3 font-semibold text-right" title="Share of readings within 5 BPM">Within 5</th>
+              <th class="pb-3 font-semibold text-right">n</th>
+            </tr>
+          </thead>
+          <tbody id="eval-table" class="divide-y divide-slate-100"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Below the fold ───────────────────────────────────────────────── -->
+  <div id="section-tips" class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-10 scroll-mt-24">
+
+    <div class="card p-6" id="section-about">
+      <div class="w-10 h-10 rounded-xl bg-brand-50 grid place-items-center">
+        <svg viewBox="0 0 24 24" class="w-5 h-5 text-brand-500" fill="currentColor">
+          <path d="M12 21s-7.5-4.7-9.3-9A5.2 5.2 0 0 1 12 6.6 5.2 5.2 0 0 1 21.3 12c-1.8 4.3-9.3 9-9.3 9Z"/>
+        </svg>
+      </div>
+      <h3 class="font-bold text-lg mt-4">Why It Matters</h3>
+      <p class="text-sm text-ink-600 mt-2">
+        Every heartbeat pushes blood into your face and changes its colour by an amount far too small
+        to see. A camera can measure it. Keeping an eye on your resting heart rate over time is one of
+        the simplest ways to notice stress, poor sleep or illness early.
+      </p>
+    </div>
+
+    <div class="card p-6">
+      <div class="w-10 h-10 rounded-xl bg-amber-50 grid place-items-center">
+        <svg viewBox="0 0 24 24" class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2Z"/>
+        </svg>
+      </div>
+      <h3 class="font-bold text-lg mt-4">Tips for Accurate Results</h3>
+      <ul class="mt-3 space-y-2 text-sm text-ink-600">
+        <li class="flex gap-2"><span>💡</span><span><b class="text-ink-900">Use even lighting.</b> Natural, diffuse light works best — avoid heavy backlighting.</span></li>
+        <li class="flex gap-2"><span>👤</span><span><b class="text-ink-900">Stay centered.</b> Keep your face fully inside the frame.</span></li>
+        <li class="flex gap-2"><span>🤫</span><span><b class="text-ink-900">Keep still.</b> Avoid sudden movement and talking during the 13 s calibration and the reading.</span></li>
+        <li class="flex gap-2"><span>👓</span><span><b class="text-ink-900">Remove glasses.</b> Glare and reflections corrupt the skin mask.</span></li>
+        <li class="flex gap-2"><span>🏠</span><span><b class="text-ink-900">Controlled environment.</b> Indoors, away from flickering light sources.</span></li>
+      </ul>
+    </div>
+
+    <div class="card p-6">
+      <div class="w-10 h-10 rounded-xl bg-rose-50 grid place-items-center">
+        <svg viewBox="0 0 24 24" class="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" stroke-width="1.9">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/>
+        </svg>
+      </div>
+      <h3 class="font-bold text-lg mt-4">Academic Disclaimer</h3>
+      <p class="text-sm text-ink-600 mt-2">
+        This tool is for information and curiosity only. It is
+        <b class="text-ink-900">not a medical device</b> and must not be used to diagnose or monitor any
+        health condition. If something about your heart rate worries you, please talk to a doctor.
+      </p>
+    </div>
+  </div>
+
+  <footer class="text-center text-xs text-ink-400 py-10">
+    PulseVision · Contactless heart-rate and stress from your webcam
+  </footer>
+  </main>
+</div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

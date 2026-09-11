@@ -1,0 +1,52 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# OS artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# Recorded clips and evaluation output.
+#
+# data/test_clip.mp4 is deliberately NOT ignored -- it is the bundled sample
+# the Accuracy Check tab offers with one click, and the repo is not much use
+# without it. Everything else a run drops in data/ is scratch.
+data/*
+!data/test_clip.mp4
+
+# Uploaded videos and ground-truth files are written to the system temp dir,
+# but catch anything that lands here by accident.
+*.avi
+*.mov
+*.mkv
+!data/test_clip.mp4
+
+# Local environment overrides
+.env
